@@ -4,23 +4,24 @@
 # │ Sebastián Ignacio Toro Severino             │
 # └─────────────────────────────────────────────┘
 
-import os, time, bcrypt
+import os, time, bcrypt, socket, pickle
 from os import listdir
+from ecies import encrypt
 
 # Ruta actual
-CURRENT_PATH = os.getcwd()
+CURRENT_PATH = os.path.normpath(os.getcwd())
 # Ruta de exportación para resultados de hashcat
-EXPORT_PATH = os.path.join(CURRENT_PATH,'exports')
+EXPORT_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'exports'))
 # Ruta de Hashcat
-HASHCAT_PATH = os.path.join(CURRENT_PATH,'hashcat-6.1.1')
-# Ruta de passwords en texto plano
-PLAIN_PWD_PATH = os.path.join(CURRENT_PATH,'plain_pwds')
+HASHCAT_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'hashcat-6.1.1'))
 # Ruta de archivos hash
-HASHFILES_PATH = os.path.join(CURRENT_PATH,'archivos_hash')
+HASHFILES_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'archivos_hash'))
 # Ruta de diccionarios
-DICTFILES_PATH = os.path.join(CURRENT_PATH,'diccionarios')
+DICTFILES_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'diccionarios'))
 # Ruta de archivos rehasheados
-REHASHFILES_PATH = os.path.join(CURRENT_PATH,'archivos_rehash')
+REHASHFILES_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'archivos_rehash'))
+# Ruta de archivos cifrados mediante ECIES con la llave pública
+ECIES_ENC_PATH = os.path.normpath(os.path.join(CURRENT_PATH,'cifrados_ecies'))
 
 # Selección de archivo a crackear y diccionario a utilizar
 def config_options():
@@ -38,18 +39,18 @@ def config_options():
     op = input('> ')
 
   if op == '1':
-    hash_file_list = [f for f in listdir(HASHFILES_PATH) if os.path.isfile(os.path.join(HASHFILES_PATH, f))]
+    hash_file_list = [f for f in listdir(HASHFILES_PATH) if os.path.isfile(os.path.normpath(os.path.join(HASHFILES_PATH, f)))]
     print('')
     for i in range(len(hash_file_list)):
-      print('['+str(i)+'] '+str(hash_file_list[i])+'')
+      print('['+str(i+1)+'] '+str(hash_file_list[i])+'')
     print('')
-    file_index = input('[Posición del archivo] > ')
+    file_index = input('Seleccione un archivo > ')
 
     try:
       # En caso de que se haya obtenido correctamente el nombre del archivo
       # según el index, se establece su ruta
-      filename = hash_file_list[int(file_index)]
-      file_path = os.path.join(HASHFILES_PATH, filename)
+      filename = hash_file_list[int(file_index)-1]
+      file_path = os.path.normpath(os.path.join(HASHFILES_PATH, filename))
 
     except Exception as err:
       print('[Error] Se ha producido el siguiente error:')
@@ -76,18 +77,18 @@ def config_options():
     op = input('> ')
   
   if op == '1':
-    dict_file_list = [f for f in listdir(DICTFILES_PATH) if os.path.isfile(os.path.join(DICTFILES_PATH, f))]
+    dict_file_list = [f for f in listdir(DICTFILES_PATH) if os.path.isfile(os.path.normpath(os.path.join(DICTFILES_PATH, f)))]
     print('')
     for i in range(len(dict_file_list)):
-      print('['+str(i)+'] '+str(dict_file_list[i])+'')
+      print('['+str(i+1)+'] '+str(dict_file_list[i])+'')
     print('')
-    dict_index = input('[Posición del archivo] > ')
+    dict_index = input('Seleccione un diccionario > ')
 
     try:
       # En caso de que se haya obtenido correctamente el nombre del diccionario
       # según el index, se establece su ruta
-      filename = dict_file_list[int(dict_index)]
-      dict_path = os.path.join(DICTFILES_PATH, filename)
+      filename = dict_file_list[int(dict_index)-1]
+      dict_path = os.path.normpath(os.path.join(DICTFILES_PATH, filename))
 
     except Exception as err:
       print('[Error] Se ha producido el siguiente error:')
@@ -136,7 +137,7 @@ def cracker(file_path,dict_path,export_filename):
       # Posix / Darwin / ...
       hashcat_cmd = hashcat_cmd.replace('\\','/') # Se modifica el formato para acceder a la carpeta de Hashcat
     
-    exportfile_path = str(os.path.join(EXPORT_PATH,export_filename)) # Ubicación para el output
+    exportfile_path = str(os.path.normpath(os.path.join(EXPORT_PATH,export_filename))) # Ubicación para el output
 
     # En caso de que exista el archivo de output con el nombre seleccionado, se elimina
     if os.path.exists(exportfile_path):
@@ -152,6 +153,7 @@ def cracker(file_path,dict_path,export_filename):
     # Se agrega el hash type al comando a ejecutar
     hashcat_cmd += ' -m'+str(hash_type)
     hashcat_cmd += ' -a0 '+file_path+' '+dict_path+' --outfile='+exportfile_path
+    hashcat_cmd += ' --outfile-format 2' # Se exportan las passwords en texto plano
     
     os.chdir(HASHCAT_PATH) # Se cambia a la carpeta de hashcat para ejecutar el CMD
     
@@ -163,10 +165,6 @@ def cracker(file_path,dict_path,export_filename):
 
     os.system(hashcat_cmd) # Se ejecuta el CMD correspondiente
     os.remove('hashcat.potfile') # Se elimina el registro de la ejecución en .potfile
- 
-    # En caso de que haya resultado, se revisa el archvio exportado para
-    # obtener los textos planos
-    plain_pwds_list_path = fetch_plain_text(exportfile_path)
 
     # Una vez guardado los archivos con las passwords en texto plano
     # se revisa si se desea realizar el proceso de re-hash
@@ -180,36 +178,110 @@ def cracker(file_path,dict_path,export_filename):
       return
     
     # Se realiza el proceso de rehash con el archivo exportado
-    hash_generator(plain_pwds_list_path)
+    hash_generator(exportfile_path)
 
   except Exception as err:
     print('[Error] Se ha producido el siguiente error: ')
     print(str(err))
 
-def fetch_plain_text(file_path):
+def to_ecies(filepath=None):
+
+  if filepath is None:
+    filepath = input('Ingrese la ruta del archivo a cifrar: ')
+  
+  # Se realiza la conexión con el servidor generador de llaves ECIES
+  sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM) # Instancia de socket
+  host = input('Ingrese el host del servidor: ')
+  port = input('Ingrese el puerto del servidor: ')
+
   try:
-    output_file = open(file_path,'r') # Archivo output de Hashcat
-    print('')
-    plain_filename = input('Ingrese el nombre del archivo para almacenar los textos planos: ')
-    # Se abre el archivo para almacenar las passwords en texto plano (w mode -> overwrite)
-    plain_file = open(os.path.join(PLAIN_PWD_PATH,plain_filename),'w')
+    # Se intenta conectar al servidor según el host y puerto especificado
+    sock.connect((host,int(port)))
+    print('* Conexión establecida con el servidor generador de llaves.')
 
-    for line in output_file:
-      line = line.strip()
-      plain_text = tuple(line.split(':',1))[1] # Tupla (hash,texto_plano)
-      plain_file.write(plain_text+'\n')
+    # Se solicita la llave pública al servidor
+    data = pickle.dumps(1) # pickle.dumps permite generar un byte objects a partir del argumento entregado (paso 1)
+    sock.send(data)
+
+    recv_data = sock.recv(4096) # Se reciben datos desde el servidor
+    public_key = recv_data.decode('UTF-8') # Se decodifica la llave pública obtenida
+
+    print('Llave pública obtenida desde el servidor: '+str(public_key))
+
+    op = input('¿Desea continuar con el cifrado del archivo seleccionado? [S/N]: ')
+
+    while op.lower() != 's' and op.lower() != 'n':
+      op = input('¿Desea continuar con el cifrado del archivo seleccionado? [S/N]: ')
+
+    if op.lower() != 's':
+      sock.close() # Se cierra la conexión con el servidor
+      return
     
-    plain_file.close() # Se cierra el archivo con las contraseñas en texto plano 
-    print('* * Archivo con passwords en texto plano en: '+str(os.path.join(PLAIN_PWD_PATH,plain_filename)))
+    # En caso de que se decida continuar, se cifra el archivo correspondiente 
+    # con la llave obtenida desde el servidor
+    ecies_enc_filepath = ecies_cipher(filepath,public_key)
 
-    return os.path.join(PLAIN_PWD_PATH,plain_filename)
+    op = input('¿Desea enviar el archivo al servidor? [S/N]: ')
+    while op.lower() != 's' and op.lower() != 'n':
+      op = input('¿Desea enviar el archivo al servidor? [S/N]: ')
+    
+    if op.lower() != 's':
+      sock.close() # Se cierra la conexión con el servidor
+      return
+    
+    print('* Archivo cifrado con ECIES en ruta: '+str(ecies_enc_filepath))
+    
+    input('Presione ENTER para continuar.')
 
+    # Se envía la señal al servidor para señalar el envío del archivo (paso 2)
+    sock.send(pickle.dumps(2))
+
+    # Se envía la ruta del archivo generado vía socket al servidor
+    sock.send(ecies_enc_filepath.encode(encoding='UTF-8'))
+
+    # Se espera a recibir la confirmación de registro en la base de datos
+    data = sock.recv(4096)
+    print('Recibido desde el servidor: '+str(data.decode('UTF-8')))
+
+    input('Presione ENTER para volver al menú.')
+    
+    # Se cierra la conexión con el servidor
+    sock.close()
+  
   except Exception as err:
     print('[Error] Se ha producido el siguiente error: ')
     print(str(err))
 
-def view_files():
   return
+
+def ecies_cipher(filepath,public_key):
+  # Función para cifrar archivo mediante ECIES y la llave pública
+  try:
+    input_file = open(filepath,'r') # Se abre el archivo con los mensajes hash a cifrar con ECIES
+
+    enc_filename = input('Ingrese el nombre del archivo para exportar los mensajes cifrados con ECIES: ')
+
+    output_filepath = os.path.normpath(os.path.join(ECIES_ENC_PATH,enc_filename))
+    output_file = open(output_filepath,'w') # Se abre el archivo para almacenar los textos con ECIES
+
+    # Se realiza el cifrado de los mensajes hash del archivo
+    # con la llave pública entregada por el servidor
+    for line in input_file:
+      hash_msg = line
+      ecies_enc_msg = encrypt(public_key,hash_msg.encode(encoding='UTF-8')) # Cifrado mediante ECIES y llave pública
+      
+      # Se almacena el mensaje cifrado en el nuevo archivo
+      output_file.write(ecies_enc_msg.hex()+str('\n'))
+    
+    # Al finalizar el proceso, se cierran los archivos
+    input_file.close()
+    output_file.close()
+
+    return output_filepath # Se retorna la ruta del archivo cifrado con ECIES
+
+  except Exception as err:
+    print('[Error] Se ha producido el siguiente error:')
+    print(str(err))
 
 def hash_generator(plain_filepath=None):
 
@@ -225,7 +297,7 @@ def hash_generator(plain_filepath=None):
       plain_pwd_file = open(plain_filepath,'r')
       # Se crea un nuevo archivo para almacenar las contraseñas rehasheadas
       rehash_filename = input('Ingrese el nombre del archivo para almacenar los nuevos hash: ')
-      rehash_file_path = os.path.join(REHASHFILES_PATH,rehash_filename)
+      rehash_file_path = os.path.normpath(os.path.join(REHASHFILES_PATH,rehash_filename))
       rehash_file = open(rehash_file_path,'w')
 
       # Se recorren las contraseñas planas y se vuelve a hashear con Bcrypt
@@ -238,13 +310,15 @@ def hash_generator(plain_filepath=None):
         # Se almacena el valor decodificado (UTF-8) en el nuevo archivo 
         rehash_file.write(pwd_hash.decode('UTF-8')+'\n')
         password_count += 1
+      
+      rehash_file.close() # Se cierra el archivo con los rehash
 
       hash_end_time = time.time() # Se obtiene el tiempo final del proceso
 
       print('................................................................................')
       print('* Se ha aplicado correctamente el algoritmo hash sobre las passwords.')
       print('- Cantidad de password hasheadas: '+str(password_count))
-      print('- Tiempo de procesamiento: '+str(hash_end_time-hash_start_time))
+      print('- Tiempo de procesamiento: '+str(hash_end_time-hash_start_time)+' segundos')
       print('- Ruta del archivo exportado: '+str(rehash_file_path))
       print('................................................................................')
       print('')
@@ -264,8 +338,8 @@ def main_menu():
   │ Tarea 4 - Cifrado Asimétrico - Criptografía y Seguridad en Redes │
   ├──────────────────────────────────────────────────────────────────┤
   │ [1] Crackear archivos                                            │
-  │ [2] Ver archivos                                                 │
-  │ [3] Generar hash sobre archivos                                  │
+  │ [2] Generar hash sobre archivos                                  │
+  │ [3] Cifrado y descifrado asimétrico                              │
   │ [4] Salir                                                        │
   └──────────────────────────────────────────────────────────────────┘''')
 
@@ -290,9 +364,9 @@ if __name__ == '__main__':
       if op == '1':
         config_options()
       elif op == '2':
-        view_files()
-      elif op == '3':
         hash_generator()
+      elif op == '3':
+        to_ecies()
       elif op == '4':
         exit()
   
